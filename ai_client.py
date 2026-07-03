@@ -48,8 +48,20 @@ PROVIDERS = [
 TIMEOUT_SECONDS = 30
 
 
+class ProviderAuthError(Exception):
+    """کلید نامعتبره یا اعتبار/توکنش تموم شده — یعنی دیگه اصلاً کار نمی‌کنه."""
+    pass
+
+
+class AllProvidersFailed(RuntimeError):
+    """هیچ providerی جواب نداد. dead_providers یعنی کدوماشون کلیدشون سوخته."""
+    def __init__(self, message, dead_providers):
+        super().__init__(message)
+        self.dead_providers = dead_providers
+
+
 def _ask_provider(provider: dict, messages: list, max_tokens: int) -> str:
-    """یک provider رو صدا می‌زنه. اگه مشکلی پیش بیاد، exception میندازه بالا."""
+    """یک provider رو صدا می‌زنه. اگه مشکلی پیش بیاد، exception می‌ندازه بالا."""
     api_key = provider.get("api_key") or os.environ.get(provider.get("api_key_env", ""))
     if not api_key:
         raise ValueError("کلید API این provider موجود نیست")
@@ -69,8 +81,8 @@ def _ask_provider(provider: dict, messages: list, max_tokens: int) -> str:
 
     if resp.status_code == 429:
         raise RuntimeError("rate limit خورد (429)")
-    if resp.status_code in (401, 403):
-        raise RuntimeError(f"کلید نامعتبر یا دسترسی رد شد ({resp.status_code})")
+    if resp.status_code in (401, 402, 403):
+        raise ProviderAuthError(f"کلید نامعتبر یا اعتبار تموم شده ({resp.status_code})")
     resp.raise_for_status()
 
     data = resp.json()
@@ -84,24 +96,30 @@ def _ask_provider(provider: dict, messages: list, max_tokens: int) -> str:
 def get_ai_response(messages: list, max_tokens: int = 1000, extra_providers: list = None):
     """
     messages: [{"role": "system"/"user"/"assistant", "content": "..."}]
-    extra_providers: providerهای اضافهای که در زمان اجرا (مثلاً از تلگرام) اضافه
+    extra_providers: providerهای اضافه‌ای که در زمان اجرا (مثلاً از تلگرام) اضافه
         شدن؛ قبل از PROVIDERهای پیش‌فرض کد امتحان می‌شن.
-    خروجی: تاپل (متن_جواب, اسم_provider_ی که جواب داد)
-    اگه همه‌ی providerها شکست بخورن، RuntimeError میده.
+    خروجی: تاپل (متن_جواب, اسم_provider_ی که جواب داد, لیست_providerهای_سوخته)
+    اگه همه‌ی providerها شکست بخورن، AllProvidersFailed می‌ده (با dead_providers).
     """
     providers = (extra_providers or []) + PROVIDERS
     failures = []
+    dead_providers = []
     for provider in providers:
         try:
             answer = _ask_provider(provider, messages, max_tokens)
             logger.info(f"جواب از provider: {provider['name']}")
-            return answer, provider["name"]
+            return answer, provider["name"], dead_providers
+        except ProviderAuthError as e:
+            logger.warning(f"{provider['name']} کلیدش سوخته: {e}")
+            failures.append(f"{provider['name']}: {e}")
+            dead_providers.append(provider["name"])
+            continue
         except Exception as e:
             logger.warning(f"{provider['name']} شکست خورد: {e}")
             failures.append(f"{provider['name']}: {e}")
             continue
 
-    raise RuntimeError("همه‌ی providerها شکست خوردن:\n" + "\n".join(failures))
+    raise AllProvidersFailed("همه‌ی providerها شکست خوردن:\n" + "\n".join(failures), dead_providers)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +130,7 @@ if __name__ == "__main__":
         {"role": "user", "content": "به فارسی، در یک جمله بگو کی هستی."}
     ]
     try:
-        answer, used = get_ai_response(test_messages)
+        answer, used, _ = get_ai_response(test_messages)
         print(f"\n[provider: {used}]\n{answer}")
     except RuntimeError as e:
         print(f"\nخطا: {e}")
