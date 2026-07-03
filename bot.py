@@ -13,12 +13,22 @@ import requests
 
 from config import BOT_TOKEN, MAX_HISTORY_MESSAGES, SYSTEM_PROMPT
 from storage import load_all, save_all
-from ai_client import get_ai_response
+from ai_client import get_ai_response, AllProvidersFailed
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 MAX_RUNTIME_SECONDS = 345 * 60   # ۵ ساعت و ۴۵ دقیقه
 POLL_TIMEOUT = 25
 TELEGRAM_MAX_LEN = 4000
+
+# اگه کاربر فقط خود کلید رو بفرسته (بدون دستور کامل)، از روی فرمتش
+# تشخیص می‌دیم مال کدوم سرویسه.
+KNOWN_KEY_PATTERNS = [
+    {"prefix": "sk-ai-v1-", "name": "zenmux", "base_url": "https://zenmux.ai/api/v1", "model": "z-ai/glm-5.2-free"},
+    {"prefix": "sk-ss-v1-", "name": "zenmux", "base_url": "https://zenmux.ai/api/v1", "model": "z-ai/glm-5.2-free"},
+    {"prefix": "gsk_", "name": "groq", "base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
+    {"prefix": "AIza", "name": "gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-2.5-flash"},
+    {"prefix": "sk-or-v1-", "name": "openrouter", "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/free"},
+]
 
 
 def send_message(chat_id, text):
@@ -77,7 +87,7 @@ def handle_update(update):
                 "فرمت درست (۴ تا با فاصله):\n"
                 "/addprovider name base_url model api_key\n\n"
                 "مثال:\n"
-                "/addprovider zenmux https://api.zenmux.ai/v1 gpt-4o-mini sk-abc123")
+                "/addprovider zenmux https://zenmux.ai/api/v1 z-ai/glm-5.2-free sk-abc123")
             return
         name, base_url, model, api_key = parts
         data = load_all()
@@ -109,6 +119,22 @@ def handle_update(update):
         send_message(chat_id, f"provider «{name}» حذف شد (اگه بود).")
         return
 
+    if " " not in user_text and not user_text.startswith("/") and len(user_text) > 15:
+        for pattern in KNOWN_KEY_PATTERNS:
+            if user_text.startswith(pattern["prefix"]):
+                data = load_all()
+                providers = [p for p in data.get("_providers", []) if p["name"] != pattern["name"]]
+                providers.append({
+                    "name": pattern["name"],
+                    "base_url": pattern["base_url"],
+                    "model": pattern["model"],
+                    "api_key": user_text,
+                })
+                data["_providers"] = providers
+                save_all(data)
+                send_message(chat_id, f"از فرمتش تشخیص دادم مال «{pattern['name']}»ه، اضافه شد و از پیام بعدی امتحان می‌شه.")
+                return
+
     data = load_all()
     history = data.get(chat_id, [])
     history.append({"role": "user", "content": user_text})
@@ -116,9 +142,12 @@ def handle_update(update):
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
         extra_providers = data.get("_providers", [])
-        reply, provider = get_ai_response(messages, extra_providers=extra_providers)
-    except RuntimeError as e:
+        reply, provider, dead_providers = get_ai_response(messages, extra_providers=extra_providers)
+    except AllProvidersFailed as e:
         print(f"همه‌ی providerها شکست خوردن: {e}")
+        if e.dead_providers:
+            data["_providers"] = [p for p in data.get("_providers", []) if p["name"] not in e.dead_providers]
+            save_all(data)
         send_message(chat_id, "متاسفانه الان هیچ سرویس هوش مصنوعی در دسترس نیست، یکم دیگه امتحان کن.")
         return
 
@@ -127,8 +156,14 @@ def handle_update(update):
     meta = data.get("_meta", {})
     meta[chat_id] = provider
     data["_meta"] = meta
+    removed_names = []
+    if dead_providers:
+        removed_names = [p["name"] for p in data.get("_providers", []) if p["name"] in dead_providers]
+        data["_providers"] = [p for p in data.get("_providers", []) if p["name"] not in dead_providers]
     save_all(data)
     send_message(chat_id, reply)
+    if removed_names:
+        send_message(chat_id, f"⚠️ سرویس(های) {'، '.join(removed_names)} دیگه جواب نمی‌دن (کلید نامعتبر یا اعتبار تموم)، از لیست حذف شدن.")
 
 
 def main():
