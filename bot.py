@@ -9,6 +9,7 @@ bot.py
 کرون تو GitHub Actions هر ۶ ساعت یه اجرای تازه شروع می‌کنه.
 """
 import time
+import re
 import requests
 
 from config import BOT_TOKEN, MAX_HISTORY_MESSAGES, SYSTEM_PROMPT
@@ -29,6 +30,29 @@ KNOWN_KEY_PATTERNS = [
     {"prefix": "AIza", "name": "gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "model": "gemini-2.5-flash"},
     {"prefix": "sk-or-v1-", "name": "openrouter", "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/free"},
 ]
+
+
+def parse_provider_from_code(text):
+    """از یه تکه کد نمونه (پایتون/جاوااسکریپت/curl) که سایت‌ها می‌دن، سعی می‌کنه
+    base_url، model و api_key رو خودکار دربیاره."""
+    url_match = re.search(r'(?:base_url|baseURL|api_base)["\']?\s*[=:]\s*["\']([^"\']+)["\']', text)
+    key_match = re.search(r'(?:api_key|apiKey|Authorization)["\']?\s*[=:]\s*["\']?(?:Bearer\s+)?([A-Za-z0-9\-_./]{15,})["\']?', text)
+    model_match = re.search(r'\bmodel["\']?\s*[=:]\s*["\']([^"\']+)["\']', text)
+
+    if not url_match or not key_match:
+        return None
+
+    key = key_match.group(1)
+    if any(bad in key.upper() for bad in ["YOUR", "XXXX", "API_KEY", "TOKEN_HERE", "HERE"]):
+        return None
+
+    base_url = url_match.group(1)
+    model = model_match.group(1) if model_match else None
+
+    domain_match = re.search(r'https?://(?:api\.)?([a-zA-Z0-9\-]+)\.', base_url)
+    name = domain_match.group(1) if domain_match else "custom"
+
+    return {"name": name, "base_url": base_url, "model": model, "api_key": key}
 
 
 def send_message(chat_id, text):
@@ -87,7 +111,7 @@ def handle_update(update):
                 "فرمت درست (۴ تا با فاصله):\n"
                 "/addprovider name base_url model api_key\n\n"
                 "مثال:\n"
-                "/addprovider zenmux https://zenmux.ai/api/v1 z-ai/glm-5.2-free sk-abc123")
+                "/addprovider zenmux https://api.zenmux.ai/v1 gpt-4o-mini sk-abc123")
             return
         name, base_url, model, api_key = parts
         data = load_all()
@@ -117,6 +141,29 @@ def handle_update(update):
         data["_providers"] = providers
         save_all(data)
         send_message(chat_id, f"provider «{name}» حذف شد (اگه بود).")
+        return
+
+    if not user_text.startswith("/") and any(kw in user_text for kw in
+            ["base_url", "baseURL", "api_base", "api_key", "apiKey"]):
+        parsed = parse_provider_from_code(user_text)
+        if parsed and parsed["model"]:
+            data = load_all()
+            providers = [p for p in data.get("_providers", []) if p["name"] != parsed["name"]]
+            providers.append(parsed)
+            data["_providers"] = providers
+            save_all(data)
+            send_message(chat_id,
+                f"از کد تشخیص دادم:\nname: {parsed['name']}\nurl: {parsed['base_url']}\n"
+                f"model: {parsed['model']}\nاضافه شد و از پیام بعدی امتحان می‌شه.")
+            return
+        if parsed and not parsed["model"]:
+            send_message(chat_id,
+                f"url و کلید رو پیدا کردم ولی اسم مدل مشخص نبود. این رو بفرست:\n"
+                f"/addprovider {parsed['name']} {parsed['base_url']} MODEL_NAME {parsed['api_key']}")
+            return
+        send_message(chat_id,
+            "نتونستم از این متن url و کلید رو دربیارم. یا کامل با /addprovider بفرست، "
+            "یا اگه سرویس شناخته‌شده‌ست فقط خود کلید رو تنها بفرست.")
         return
 
     if " " not in user_text and not user_text.startswith("/") and len(user_text) > 15:
