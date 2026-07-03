@@ -42,13 +42,81 @@ def handle_update(update):
         send_message(chat_id, "سلام! هرچی بخوای می‌تونی ازم بپرسی.")
         return
 
+    if user_text == "/reset":
+        data = load_all()
+        data[chat_id] = []
+        save_all(data)
+        send_message(chat_id, "تاریخچه پاک شد، از اول شروع کن.")
+        return
+
+    if user_text == "/help":
+        send_message(chat_id,
+            "دستورات:\n"
+            "/start - شروع مکالمه\n"
+            "/reset - پاک کردن تاریخچه و شروع دوباره\n"
+            "/status - آخرین سرویس هوش مصنوعی که جواب داده\n"
+            "/addprovider name url model key - اضافه کردن سرویس AI جدید\n"
+            "/providers - لیست سرویس‌های اضافه‌شده\n"
+            "/removeprovider name - حذف یه سرویس\n"
+            "/help - همین راهنما")
+        return
+
+    if user_text == "/status":
+        data = load_all()
+        provider = data.get("_meta", {}).get(chat_id)
+        if provider:
+            send_message(chat_id, f"آخرین جواب از: {provider}")
+        else:
+            send_message(chat_id, "هنوز پیامی رد و بدل نشده.")
+        return
+
+    if user_text.startswith("/addprovider"):
+        parts = user_text.split()[1:]
+        if len(parts) != 4:
+            send_message(chat_id,
+                "فرمت درست (۴ تا با فاصله):\n"
+                "/addprovider name base_url model api_key\n\n"
+                "مثال:\n"
+                "/addprovider zenmux https://api.zenmux.ai/v1 gpt-4o-mini sk-abc123")
+            return
+        name, base_url, model, api_key = parts
+        data = load_all()
+        providers = [p for p in data.get("_providers", []) if p["name"] != name]
+        providers.append({"name": name, "base_url": base_url, "model": model, "api_key": api_key})
+        data["_providers"] = providers
+        save_all(data)
+        send_message(chat_id, f"provider «{name}» اضافه شد و از پیام بعدی امتحان می‌شه.")
+        return
+
+    if user_text == "/providers":
+        data = load_all()
+        names = [p["name"] for p in data.get("_providers", [])]
+        text = "providerهای اضافه‌شده: " + ("، ".join(names) if names else "هیچی")
+        text += "\n(به‌علاوه‌ی gemini و groq که تو کد ثابتن)"
+        send_message(chat_id, text)
+        return
+
+    if user_text.startswith("/removeprovider"):
+        parts = user_text.split()[1:]
+        if len(parts) != 1:
+            send_message(chat_id, "فرمت درست:\n/removeprovider name")
+            return
+        name = parts[0]
+        data = load_all()
+        providers = [p for p in data.get("_providers", []) if p["name"] != name]
+        data["_providers"] = providers
+        save_all(data)
+        send_message(chat_id, f"provider «{name}» حذف شد (اگه بود).")
+        return
+
     data = load_all()
     history = data.get(chat_id, [])
     history.append({"role": "user", "content": user_text})
 
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
-        reply, provider = get_ai_response(messages)
+        extra_providers = data.get("_providers", [])
+        reply, provider = get_ai_response(messages, extra_providers=extra_providers)
     except RuntimeError as e:
         print(f"همه‌ی providerها شکست خوردن: {e}")
         send_message(chat_id, "متاسفانه الان هیچ سرویس هوش مصنوعی در دسترس نیست، یکم دیگه امتحان کن.")
@@ -56,6 +124,9 @@ def handle_update(update):
 
     history.append({"role": "assistant", "content": reply})
     data[chat_id] = history[-MAX_HISTORY_MESSAGES:]
+    meta = data.get("_meta", {})
+    meta[chat_id] = provider
+    data["_meta"] = meta
     save_all(data)
     send_message(chat_id, reply)
 
