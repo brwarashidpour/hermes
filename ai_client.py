@@ -49,10 +49,10 @@ TIMEOUT_SECONDS = 30
 
 
 def _ask_provider(provider: dict, messages: list, max_tokens: int) -> str:
-    """یک provider رو صدا می‌زنه. اگه مشکلی پیش بیاد، exception می‌ندازه بالا."""
-    api_key = os.environ.get(provider["api_key_env"])
+    """یک provider رو صدا می‌زنه. اگه مشکلی پیش بیاد، exception میندازه بالا."""
+    api_key = provider.get("api_key") or os.environ.get(provider.get("api_key_env", ""))
     if not api_key:
-        raise ValueError(f"env var «{provider['api_key_env']}» تنظیم نشده")
+        raise ValueError("کلید API این provider موجود نیست")
 
     url = f"{provider['base_url'].rstrip('/')}/chat/completions"
     headers = {
@@ -81,14 +81,17 @@ def _ask_provider(provider: dict, messages: list, max_tokens: int) -> str:
     return content.strip()
 
 
-def get_ai_response(messages: list, max_tokens: int = 1000):
+def get_ai_response(messages: list, max_tokens: int = 1000, extra_providers: list = None):
     """
     messages: [{"role": "system"/"user"/"assistant", "content": "..."}]
+    extra_providers: providerهای اضافهای که در زمان اجرا (مثلاً از تلگرام) اضافه
+        شدن؛ قبل از PROVIDERهای پیش‌فرض کد امتحان می‌شن.
     خروجی: تاپل (متن_جواب, اسم_provider_ی که جواب داد)
-    اگه همه‌ی providerها شکست بخورن، RuntimeError می‌ده.
+    اگه همه‌ی providerها شکست بخورن، RuntimeError میده.
     """
+    providers = (extra_providers or []) + PROVIDERS
     failures = []
-    for provider in PROVIDERS:
+    for provider in providers:
         try:
             answer = _ask_provider(provider, messages, max_tokens)
             logger.info(f"جواب از provider: {provider['name']}")
