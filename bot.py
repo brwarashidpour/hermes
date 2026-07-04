@@ -135,4 +135,5 @@ def handle_update(update):
         data = load_all()
         names = [p["name"] for p in data.get("_providers", [])]
         text = "providerهای اضافهشده: " + ("، ".join(names) if names else "هیچی")
-        text += "\n(به
+        text += "\n(به‌علاوه‌ی gemini و groq که تو کد ثابتن)"
+
