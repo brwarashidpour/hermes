@@ -39,6 +39,48 @@ HISTORY_COMPACT_THRESHOLD = 24
 HISTORY_KEEP_RECENT = 12
 MAX_SUMMARY_CHARS = 2000
 
+# صدای فارسی (محاوره‌ای و رسمی)
+PERSIAN_VOICE = "fa-IR-DilaraNeural"   # زن؛ برای صدای مرد: fa-IR-FaridNeural
+KURDISH_VOICE_CANDIDATES = ["ckb-IQ-SorooshNeural", "ckb-IQ-NazaninNeural"]  # تأییدشده نیست، best-effort
+
+# نگاشت سبک → صداهای نامزد
+STYLE_VOICE_MAP = {
+    "fa_colloquial": [PERSIAN_VOICE],
+    "fa_formal": ["fa-IR-FaridNeural"],   # صدای مرد برای رسمی‌تر، یا می‌توانید همان DilaraNeural بگذارید
+    "ckb_sorani": KURDISH_VOICE_CANDIDATES,
+}
+
+# تعریف سبک‌های ترجمه با دستورالعمل‌های دقیق
+TRANSLATION_STYLES = [
+    {
+        "key": "fa_colloquial",
+        "label": "فارسی محاوره‌ای",
+        "suffix": "fa-colloquial",
+        "instruction": (
+            "فارسی محاوره‌ای طبیعی و روزمره (تهرانی)، کاملاً غیررسمی و صمیمی. "
+            "از کلمات رباتیک و ترجمه‌ی کلمه‌به‌کلمه پرهیز کن. جمله‌ها کوتاه و روان باشند."
+        ),
+    },
+    {
+        "key": "fa_formal",
+        "label": "فارسی رسمی و اداری",
+        "suffix": "fa-formal",
+        "instruction": (
+            "فارسی رسمی، اداری و استاندارد با رعایت کامل دستور زبان فارسی معیار. "
+            "واژگان کتابی و مؤدبانه. مناسب مکاتبات رسمی و خبری."
+        ),
+    },
+    {
+        "key": "ckb_sorani",
+        "label": "کوردی سورانی",
+        "suffix": "ckb-sorani",
+        "instruction": (
+            "کوردی سورانی استاندارد (نه کرمانجی) با رعایت دقیق گرامر، صرف و نحو زبان سورانی. "
+            "واژگان بومی و اصیل سورانی، بدون آمیختگی با فارسی."
+        ),
+    },
+]
+
 
 def compact_history(chat_id, data):
     """اگه تاریخچه خیلی طولانی شده، بخش قدیمیش رو (به‌جای دور ریختن خام) یه‌بار
@@ -65,6 +107,8 @@ def compact_history(chat_id, data):
     summaries[chat_id] = combined[-MAX_SUMMARY_CHARS:]
     data["_history_summary"] = summaries
     return recent_part
+
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 DEFAULT_TRANSLATE_LANG = "fa"
@@ -135,10 +179,6 @@ def build_txt(segments):
     return "\n".join(seg["text"].strip() for seg in segments)
 
 
-PERSIAN_VOICE = "fa-IR-DilaraNeural"   # زن؛ برای صدای مرد: fa-IR-FaridNeural
-KURDISH_VOICE_CANDIDATES = ["ckb-IQ-SorooshNeural", "ckb-IQ-NazaninNeural"]  # تأییدشده نیست، best-effort
-
-
 async def _tts_generate(text, output_path, voice):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
@@ -161,28 +201,6 @@ def send_audio_file(chat_id, file_path, caption=""):
         print(f"خطا در ارسال صدا: {e}")
 
 
-TRANSLATION_STYLES = [
-    {
-        "key": "fa_colloquial",
-        "label": "فارسی محاوره‌ای",
-        "suffix": "fa-colloquial",
-        "instruction": "فارسی محاوره‌ای و طبیعی، شبیه فارسی روزمره‌ی تهرانی، از کلمات رباتیک و ترجمه‌ی کلمه‌به‌کلمه پرهیز کن",
-    },
-    {
-        "key": "fa_formal",
-        "label": "فارسی رسمی و اداری",
-        "suffix": "fa-formal",
-        "instruction": "فارسی رسمی و اداری، کاملاً منطبق با گرامر و قواعد زبان معیار فارسی، مناسب مکاتبات رسمی",
-    },
-    {
-        "key": "ckb_sorani",
-        "label": "کوردی سورانی",
-        "suffix": "ckb-sorani",
-        "instruction": "کوردی سورانی (نه کرمانجی)، با رعایت دقیق گرامر و قواعد نگارشی زبان کوردی سورانی",
-    },
-]
-
-
 def translate_segments_styled(segments, style):
     """مثل translate_segments ولی با یه سبک/زبان مشخص (از TRANSLATION_STYLES)."""
     joined = " ||| ".join(seg["text"].strip() for seg in segments)
@@ -203,9 +221,20 @@ def translate_segments_styled(segments, style):
 
 
 def translate_full_text_natural(full_text, instruction):
-    """کل متن رو یکجا و روون (نه تیکه‌تیکه) طبق instruction ترجمه می‌کنه — مخصوص متن
-    مرجع/صدا، با علامت‌گذاری درست تا موقع خونده‌شدن طبیعی به‌نظر بیاد."""
-    prompt = f"{instruction}\n\nفقط متن ترجمه‌شده رو بده، بدون توضیح اضافه:\n\n{full_text}"
+    """ترجمه روان با آماده‌سازی هم‌زمان برای TTS:
+    - اعداد به حروف
+    - علائم نگارشی مناسب
+    - مکث‌های طبیعی
+    """
+    prompt = f"{instruction}\n\n"
+    prompt += (
+        "نکات مهم برای خروجی:\n"
+        "۱. تمام اعداد را به حروف بنویس (مثلاً ۲۵ → بیست و پنج).\n"
+        "۲. علائم نگارشی (. , ؟) را در جای مناسب اضافه کن تا هنگام خواندن مکث طبیعی داشته باشد.\n"
+        "۳. هیچ پرانتز، توضیح اضافه یا برچسبی ننویس. فقط متن ترجمه‌شده را برگردان.\n"
+        "۴. اختصارات را کامل بنویس.\n\n"
+        f"متن اصلی:\n{full_text}"
+    )
     try:
         translated, _, _ = get_ai_response([{"role": "user", "content": prompt}], max_tokens=4000)
         return translated
@@ -241,41 +270,6 @@ def transcribe_audio(file_path):
     data = resp.json()
     segments = [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in data.get("segments", [])]
     return segments, data.get("language", "نامشخص")
-
-
-TRANSLATION_TARGETS = [
-    {"key": "fa_casual", "label": "فارسی محاوره‌ای", "lang_code": "fa",
-     "style": "محاوره‌ای و طبیعی، مثل فارسی روزمره‌ی تهرانی، بدون کلمات رباتیک",
-     "tts_voice": "fa-IR-DilaraNeural"},
-    {"key": "fa_formal", "label": "فارسی رسمی", "lang_code": "fa",
-     "style": "کاملاً رسمی و اداری، با دستور زبان دقیق و واژگان معیار فارسی",
-     "tts_voice": "fa-IR-DilaraNeural"},
-    {"key": "ckb", "label": "کردی سورانی", "lang_code": "ckb",
-     "style": "کردی سورانی با گرامر و قواعد زبانی دقیق و درست",
-     "tts_voice": None},  # صدای رایگان معتبر کردی سورانی پیدا نشد؛ فقط متن/زیرنویس
-]
-
-
-def translate_segments(segments, style, target_lang=DEFAULT_TRANSLATE_LANG):
-    """سعی می‌کنه متن هر بخش رو با حفظ هم‌ترازی زمان‌بندی ترجمه کنه. اگه هم‌ترازی
-    به‌هم بخوره (تعداد بخش‌ها فرق کنه)، None برمی‌گردونه."""
-    joined = " ||| ".join(seg["text"].strip() for seg in segments)
-    prompt = (
-        f"متن زیر با جداکننده‌ی ' ||| ' به {len(segments)} بخش تقسیم شده. هر بخش رو روان و طبیعی "
-        f"به زبان با کد {target_lang} ترجمه کن — لحن رو با نوع محتوا هماهنگ کن: اگه محتوا رسمی/اداری/خبری/آموزشیه، "
-        f"از فارسی رسمی و درست استفاده کن؛ اگه محاوره‌ای و صمیمیه (مکالمه‌ی روزمره، شبکه‌های اجتماعی)، از لحن "
-        f"محاوره‌ای طبیعی (نه رسمی و کتابی، ولی نه شعاری) استفاده کن. از کلمات رباتیک و ترجمه‌ی کلمه‌به‌کلمه "
-        f"پرهیز کن. دقیقاً با همون جداکننده‌ی ' ||| ' بین بخش‌های ترجمه‌شده جدا کن. تعداد بخش‌های خروجی باید "
-        f"دقیقاً {len(segments)} تا باشه، بدون هیچ توضیح اضافه:\n\n{joined}"
-    )
-    try:
-        reply, _, _ = get_ai_response([{"role": "user", "content": prompt}], max_tokens=4000)
-    except AllProvidersFailed:
-        return None
-    parts = [p.strip() for p in reply.split("|||")]
-    if len(parts) != len(segments):
-        return None
-    return parts
 
 
 def send_document_bytes(chat_id, filename, content_bytes, caption=""):
@@ -398,11 +392,20 @@ def handle_media_message(chat_id, media):
         send_message(chat_id, "هیچ گفتاری تو فایل تشخیص داده نشد.")
         return
 
-    send_message(chat_id, f"زبان تشخیص داده شده: {detected_lang}. متن اصلی آماده شد، در حال ترجمه...")
+    send_message(chat_id, f"زبان تشخیص داده شده: {detected_lang}. متن اصلی آماده شد.")
     send_document(chat_id, "original.srt", build_srt(segments))
     send_document(chat_id, "original.txt", build_txt(segments))
 
-    for style in TRANSLATION_STYLES:
+    # دریافت ترجیحات کاربر
+    data = load_all()
+    prefs = data.get("_translation_prefs", {})
+    # پیش‌فرض: همه سبک‌ها
+    selected_keys = prefs.get(chat_id, ["fa_colloquial", "fa_formal", "ckb_sorani"])
+
+    # فیلتر کردن سبک‌های فعال بر اساس انتخاب کاربر
+    styles_to_process = [s for s in TRANSLATION_STYLES if s["key"] in selected_keys]
+
+    for style in styles_to_process:
         translated_parts = translate_segments_styled(segments, style)
         if not translated_parts:
             send_message(chat_id, f"⚠️ ترجمه‌ی سبک «{style['label']}» هم‌تراز نشد، ردش می‌کنم.")
@@ -413,22 +416,41 @@ def handle_media_message(chat_id, media):
             for s, t in zip(segments, translated_parts)
         ]
         suffix = style["suffix"]
+
+        # ارسال فایل‌های زیرنویس
         send_document(chat_id, f"translated_{suffix}.srt", build_srt(translated_segments))
         send_document(chat_id, f"translated_{suffix}.txt", build_txt(translated_segments))
-        if style["key"] == "fa_colloquial":
-            send_document(chat_id, f"translated_{suffix}.vtt", build_vtt(translated_segments))
-            send_document(chat_id, f"translated_{suffix}.sbv", build_sbv(translated_segments))
+        send_document(chat_id, f"translated_{suffix}.vtt", build_vtt(translated_segments))
+        send_document(chat_id, f"translated_{suffix}.sbv", build_sbv(translated_segments))
 
-            natural_text = translate_full_text_natural(build_txt(segments))
-            tts_source_text = natural_text or build_txt(translated_segments)
+        # --- مرحله تولید صدای هماهنگ ---
+        # ۱. متن اصلی را به صورت یکپارچه بگیر
+        full_original = build_txt(segments)
+
+        # ۲. آماده‌سازی متن برای TTS (ترجمه + تبدیل اعداد + علائم نگارشی)
+        tts_ready_text = translate_full_text_natural(full_original, style["instruction"])
+        if not tts_ready_text:
+            # اگر AI نتوانست، از ترجمه‌ی قطعه‌ای به‌هم‌چسبیده استفاده می‌کنیم
+            tts_ready_text = build_txt(translated_segments)
+
+        # ۳. تولید صدا (اگر صداهای نامزد موجود باشد)
+        voice_candidates = STYLE_VOICE_MAP.get(style["key"], [])
+        if voice_candidates:
             try:
                 with tempfile.TemporaryDirectory() as tts_tmpdir:
-                    audio_out_path = os.path.join(tts_tmpdir, "voice_fa.mp3")
-                    text_to_speech_fa(tts_source_text, audio_out_path)
-                    send_audio_file(chat_id, audio_out_path, caption="صدای فارسیِ ترجمه (محاوره‌ای)")
+                    audio_out_path = os.path.join(tts_tmpdir, f"voice_{style['key']}.mp3")
+                    used_voice = try_generate_speech(tts_ready_text, audio_out_path, voice_candidates)
+                    if used_voice:
+                        send_audio_file(chat_id, audio_out_path, caption=f"صدای {style['label']} (هماهنگ با متن)")
+                    else:
+                        send_message(chat_id, f"⚠️ تولید صدای {style['label']} ناموفق بود (هیچ صدای نامزدی کار نکرد).")
             except Exception as e:
-                print(f"خطا در تولید صدای فارسی: {e}")
-                send_message(chat_id, "متن ترجمه آماده شد ولی تولید صدای فارسی موفق نشد.")
+                print(f"خطا در تولید صدای {style['label']}: {e}")
+                send_message(chat_id, f"⚠️ متن ترجمه‌ی {style['label']} آماده شد ولی تولید صدا موفق نشد.")
+        else:
+            # اگر صدا نداشتیم (مثلاً کردی)، فقط اطلاع می‌دهیم
+            send_message(chat_id, f"متن ترجمه‌ی {style['label']} آماده شد (صدا در دسترس نیست).")
+
 
 def fetch_channel_posts_simple(channel, limit=100):
     """پست‌های اخیر یه کانال عمومی رو برای خلاصه‌سازی می‌گیره (بدون نیاز به عضویت)."""
@@ -477,7 +499,7 @@ def parse_provider_from_code(text):
         text)
     if not url_match:
         # اگه پیدا نشد، دنبال هر URLی بگرد که شبیه endpoint هوش مصنوعیه
-        url_match = re.search(r'["\']?(https?://[^\s"\']+/(?:chat/completions|v\d+[^\s"\']*))["\']?', text)
+        url_match = re.search(r'["\']?(https?://[^\s"\']+(?:/chat/completions|/v\d+[^\s"\']*))["\']?', text)
     if not url_match:
         # آخرین تلاش: هر URL که تو کد باشه
         url_match = re.search(r'["\'](https?://[^\s"\']+)["\']', text)
@@ -557,6 +579,31 @@ def handle_update(update):
         buffer[chat_id] = chat_buf[-MAX_GROUP_BUFFER:]
         data["_group_buffer"] = buffer
         save_all(data)
+        return
+
+    # --- دستورات جدید و موجود ---
+
+    if user_text.startswith("/translation"):
+        parts = user_text.split()
+        if len(parts) != 2:
+            send_message(chat_id, "فرمت: /translation [colloquial|formal|sorani|all]")
+            return
+        mode = parts[1].lower()
+        allowed = {
+            "colloquial": ["fa_colloquial"],
+            "formal": ["fa_formal"],
+            "sorani": ["ckb_sorani"],
+            "all": ["fa_colloquial", "fa_formal", "ckb_sorani"]
+        }
+        if mode not in allowed:
+            send_message(chat_id, "گزینه‌های معتبر: colloquial, formal, sorani, all")
+            return
+        data = load_all()
+        prefs = data.get("_translation_prefs", {})
+        prefs[chat_id] = allowed[mode]
+        data["_translation_prefs"] = prefs
+        save_all(data)
+        send_message(chat_id, f"حالت ترجمه به {mode} تغییر کرد.")
         return
 
     if user_text.startswith("/summarize"):
@@ -669,6 +716,7 @@ def handle_update(update):
             "/skill off - خاموش کردن اسکیل فعال\n"
             "/skill list - لیست اسکیل‌های ساخته‌شده\n"
             "/skill delete name - حذف یه اسکیل\n"
+            "/translation [colloquial|formal|sorani|all] - انتخاب حالت ترجمه ویدیو/صدا\n"
             "/help - همین راهنما\n\n"
             "📹 یه ویدیو، صدا، یا ویس (حداکثر ~۱۹ مگابایت) بفرست تا زبانش تشخیص داده بشه "
             "و متن اصلی + ترجمه‌ش رو به‌صورت srt/vtt/sbv/txt برات بفرستم.\n\n"
