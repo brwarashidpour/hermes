@@ -856,7 +856,7 @@ def handle_update(update):
     doc = message.get("document")
     photo = message.get("photo")
     
-    # اگر فایل سند ارسال شده (Word، PDF، یا عکس) و کپشن دارد یا دستور /addauction دارد
+    # اگر فایل سند ارسال شده (Word، PDF، یا عکس)
     if doc:
         mime = doc.get("mime_type") or ""
         filename = doc.get("file_name") or ""
@@ -865,22 +865,22 @@ def handle_update(update):
         
         if mime.startswith(("video/", "audio/")):
             media = doc
-        elif mime.startswith("image/"):
-            handle_image_optimize(chat_id, doc["file_id"], caption)
-            return
+        # ====== تغییر مهم: ابتدا بررسی کنیم آیا فایل تصویر / سند مزایده است ======
         elif ext in (".pdf", ".docx") or ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
             handle_auction_document(chat_id, doc["file_id"], caption)
+            return
+        # سپس اگر تصویر معمولی بود، فشرده‌سازی شود
+        elif mime.startswith("image/"):
+            handle_image_optimize(chat_id, doc["file_id"], caption)
             return
         else:
             send_message(chat_id, "این نوع فایل پشتیبانی نمی‌شود. لطفاً فایل PDF، DOCX یا تصویر ارسال کنید.")
             return
 
     if photo:
-        # اگر عکسی به عنوان سند مزایده ارسال شده (با کپشن یا بدون)
+        # اگر عکسی به عنوان سند مزایده ارسال شده
         caption = (message.get("caption") or "").strip()
         if caption.startswith("/addauction"):
-            # اگر کاربر /addauction نوشته و عکس فرستاده
-            # ارسال عکس به عنوان سند مزایده
             file_id = photo[-1]["file_id"]
             handle_auction_document(chat_id, file_id, caption)
             return
