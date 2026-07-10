@@ -1,5 +1,8 @@
+feedparser
+PyMuPDF
+python-docx
+edge-tts
 requests
-beautifulsoup4
 jdatetime
 Pillow
-edge-tts
+beautifulsoup4
