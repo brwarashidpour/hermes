@@ -18,7 +18,10 @@ import jdatetime
 import io
 import asyncio
 import edge_tts
-from datetime import datetime
+import feedparser  # برای خواندن RSS خبری
+import fitz  # PyMuPDF برای PDF
+import docx  # python-docx برای Word
+from datetime import datetime, timedelta
 from PIL import Image
 from bs4 import BeautifulSoup
 
@@ -195,9 +198,9 @@ def text_to_ssml(text, voice_rate="+0%", voice_pitch="+0Hz"):
     text = text.replace(";", ";<break time='200ms'/>")
     # حذف مکث‌های اضافی پشت سر هم
     text = re.sub(r'<break[^>]*/>\s*<break[^>]*/>', '<break time="300ms"/>', text)
-    # ساخت SSML
+    # ساخت SSML با تنظیم زبان فارسی
     ssml = f"""<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="fa">
-<voice name="{PERSIAN_VOICE}">
+<voice name="{PERSIAN_VOICE}" xml:lang="fa">
 <prosody rate="{voice_rate}" pitch="{voice_pitch}">
 {text}
 </prosody>
@@ -207,7 +210,7 @@ def text_to_ssml(text, voice_rate="+0%", voice_pitch="+0Hz"):
 
 async def _tts_generate(text, output_path, voice, use_ssml=True):
     if use_ssml:
-        # تنظیم سرعت و زیروبمی بر اساس نوع صدا (می‌توان سفارشی‌سازی کرد)
+        # تنظیم سرعت و زیروبمی بر اساس نوع صدا
         rate = "+0%"
         pitch = "+0Hz"
         if "Farid" in voice:  # صدای مرد، اندکی بم‌تر
@@ -570,6 +573,245 @@ def send_message(chat_id, text):
             print(f"خطا در ارسال پیام: {e}")
 
 
+# ======================== Skill: جستجوی ترندهای ۳۰ روز اخیر ========================
+def fetch_news_rss(query, max_results=20):
+    """دریافت اخبار از Google News از طریق RSS برای ۳۰ روز اخیر (بدون نیاز به API)"""
+    url = f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en&as_qdr=m1"
+    feed = feedparser.parse(url)
+    articles = []
+    for entry in feed.entries[:max_results]:
+        articles.append({
+            "title": entry.title,
+            "link": entry.link,
+            "summary": entry.summary if hasattr(entry, 'summary') else "",
+            "published": entry.published if hasattr(entry, 'published') else ""
+        })
+    return articles
+
+def handle_trend(chat_id, query):
+    """پردازش دستور /trend و خلاصه‌سازی اخبار با AI"""
+    send_message(chat_id, f"🔍 در حال جستجوی اخبار و ترندهای ۳۰ روز اخیر درباره «{query}»...")
+    try:
+        articles = fetch_news_rss(query)
+        if not articles:
+            send_message(chat_id, "نتیجه‌ای برای این موضوع پیدا نشد. لطفاً موضوع دیگری را امتحان کنید.")
+            return
+
+        # آماده‌سازی متن برای خلاصه‌سازی
+        text_to_summarize = "\n".join([
+            f"- {a['title']}: {a['summary'][:300]}" for a in articles
+        ])
+
+        prompt = (
+            f"لیست زیر اخبار و مقالات مرتبط با «{query}» در ۳۰ روز اخیر است. "
+            "لطفاً مهم‌ترین رویدادها، ترندها، و مباحث داغ را در قالب ۵ تا ۱۰ نکته کلیدی و به صورت خلاصه و دقیق استخراج کن. "
+            "بر روی پیشرفت‌های فناوری، APIهای رایگان جدید، و اتفاقات مهم تمرکز کن.\n\n"
+            f"{text_to_summarize}\n\n"
+            "خروجی باید به فارسی روان و با رعایت اولویت‌بندی موضوعات باشد."
+        )
+        summary, _, _ = get_ai_response([{"role": "user", "content": prompt}], max_tokens=2000)
+        send_message(chat_id, f"📰 **خلاصه ترندهای «{query}» در ۳۰ روز اخیر:**\n\n{summary}")
+    except Exception as e:
+        send_message(chat_id, f"خطا در جستجوی اخبار: {e}")
+
+
+# ======================== Skill: پردازش اسناد مزایده (Word & PDF) ========================
+def extract_text_from_doc(file_bytes, filename):
+    """متن فایل PDF یا DOCX را استخراج می‌کند."""
+    ext = os.path.splitext(filename)[1].lower()
+    text = ""
+    if ext == ".pdf":
+        # استخراج با PyMuPDF
+        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+            for page in doc:
+                text += page.get_text()
+    elif ext == ".docx":
+        # استخراج با python-docx
+        doc = docx.Document(io.BytesIO(file_bytes))
+        text = "\n".join([para.text for para in doc.paragraphs])
+    else:
+        raise ValueError("فرمت فایل پشتیبانی نمی‌شود (فقط PDF و DOCX)")
+    return normalize_text(text)
+
+def parse_auction_text(text):
+    """با استفاده از AI، اطلاعات کلیدی مزایده را استخراج می‌کند."""
+    prompt = (
+        "متن زیر سند مزایده یک خودرو است. لطفاً اطلاعات زیر را با دقت استخراج کن و به صورت JSON برگردان:\n"
+        "1. تاریخ مزایده (به صورت میلادی یا شمسی - هر کدام موجود است)\n"
+        "2. نوع وسیله نقلیه (مثلاً سواری، وانت، کامیون)\n"
+        "3. مدل وسیله نقلیه (سال و برند)\n"
+        "4. مبلغ ودیعه (به ریال یا تومان)\n"
+        "5. شماره شاسی (VIN)\n"
+        "6. شماره پلاک (اگر موجود است)\n"
+        "7. مبلغ پایه قیمت (قیمت شروع)\n"
+        "8. وضعیت خودرو (مثلاً سالم، تصادفی، نو، کارکرده)\n"
+        "9. محل تحویل خودرو\n"
+        "10. شرایط و ضوابط مهم (مثلاً، نیاز به وکالت، هزینه انتقال، و غیره)\n\n"
+        f"متن سند:\n{text[:8000]}\n\n"
+        "فقط JSON خروجی بده، بدون توضیح اضافه. اگر فیلدی پیدا نشد، مقدار null بگذار."
+    )
+    try:
+        reply, _, _ = get_ai_response([{"role": "user", "content": prompt}], max_tokens=1500)
+        # تلاش برای استخراج JSON از پاسخ
+        import json
+        # پیدا کردن اولین { و آخرین }
+        start = reply.find('{')
+        end = reply.rfind('}') + 1
+        if start != -1 and end > start:
+            json_str = reply[start:end]
+            return json.loads(json_str)
+        else:
+            return None
+    except Exception as e:
+        print(f"خطا در تجزیه متن مزایده: {e}")
+        return None
+
+def handle_auction_document(chat_id, file_id, caption):
+    """پردازش سند مزایده و ذخیره اطلاعات"""
+    try:
+        # دانلود فایل
+        file_info = requests.get(f"{API_URL}/getFile", params={"file_id": file_id}, timeout=30).json()
+        file_path = file_info["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        file_bytes = requests.get(file_url, timeout=60).content
+        filename = file_info["result"]["file_path"].split("/")[-1]
+
+        # استخراج متن
+        text = extract_text_from_doc(file_bytes, filename)
+        if not text:
+            send_message(chat_id, "متن فایل خالی یا قابل خواندن نیست.")
+            return
+
+        # استخراج اطلاعات با AI
+        data = parse_auction_text(text)
+        if not data:
+            send_message(chat_id, "نتونستم اطلاعات مزایده رو به درستی استخراج کنم. لطفاً فایل رو بررسی کن یا با کپشن دستی بفرست.")
+            return
+
+        # پیدا کردن تاریخ مزایده (تلاش برای تشخیص)
+        auction_date_str = data.get("تاریخ مزایده") or data.get("date") or data.get("auction_date")
+        if not auction_date_str:
+            send_message(chat_id, "تاریخ مزایده در فایل پیدا نشد. لطفاً تاریخ رو به صورت دستی تو کپشن بنویسید (مثلاً 1405-06-01).")
+            return
+
+        # تبدیل تاریخ به میلادی و شمسی
+        try:
+            # تلاش برای تشخیص فرمت تاریخ (شمسی یا میلادی)
+            if re.match(r'\d{4}-\d{2}-\d{2}', auction_date_str):
+                year, month, day = map(int, auction_date_str.split('-'))
+                if year > 1400:  # شمسی
+                    due_jalali = f"{year}-{month:02d}-{day:02d}"
+                    due_gregorian = jdatetime.date(year, month, day).togregorian()
+                else:  # میلادی
+                    due_gregorian = datetime(year, month, day).date()
+                    jd = jdatetime.date.fromgregorian(date=due_gregorian)
+                    due_jalali = f"{jd.year}-{jd.month:02d}-{jd.day:02d}"
+            else:
+                # ساده: فرض می‌کنیم شمسی است و با جداکننده / یا .
+                auction_date_str = re.sub(r'[\./]', '-', auction_date_str)
+                parts = list(map(int, re.findall(r'\d+', auction_date_str)))
+                if len(parts) >= 3:
+                    year, month, day = parts[0], parts[1], parts[2]
+                    if year < 100:  # دو رقمی
+                        year += 1400
+                    due_jalali = f"{year}-{month:02d}-{day:02d}"
+                    due_gregorian = jdatetime.date(year, month, day).togregorian()
+                else:
+                    raise ValueError("فرمت تاریخ نامشخص")
+        except Exception as e:
+            send_message(chat_id, f"خطا در خواندن تاریخ: {e}. لطفاً تاریخ رو به صورت شمسی (سال-ماه-روز) توی کپشن بنویسید.")
+            return
+
+        # ذخیره در حافظه
+        records = load_all()
+        auctions = records.get("_auctions", [])
+        new_id = str(max([int(a["id"]) for a in auctions], default=0) + 1)
+
+        # خلاصه اطلاعات برای نمایش
+        summary_lines = [
+            f"🆔 شناسه: {new_id}",
+            f"📅 تاریخ مزایده: {due_jalali}",
+            f"🚗 نوع خودرو: {data.get('نوع وسیله نقلیه', 'نامشخص')}",
+            f"🏷️ مدل: {data.get('مدل وسیله نقلیه', 'نامشخص')}",
+            f"💰 ودیعه: {data.get('مبلغ ودیعه', 'نامشخص')}",
+            f"🔢 شماره شاسی: {data.get('شماره شاسی', 'نامشخص')}",
+            f"📋 وضعیت: {data.get('وضعیت خودرو', 'نامشخص')}",
+            f"📍 محل تحویل: {data.get('محل تحویل خودرو', 'نامشخص')}",
+        ]
+        if data.get("شماره پلاک"):
+            summary_lines.append(f"🔢 پلاک: {data['شماره پلاک']}")
+        if data.get("مبلغ پایه قیمت"):
+            summary_lines.append(f"💵 قیمت پایه: {data['مبلغ پایه قیمت']}")
+        if data.get("شرایط و ضوابط مهم"):
+            summary_lines.append(f"📜 شرایط: {data['شرایط و ضوابط مهم']}")
+
+        auction_record = {
+            "id": new_id,
+            "chat_id": chat_id,
+            "file_id": file_id,
+            "due_jalali": due_jalali,
+            "due_gregorian": due_gregorian.isoformat(),
+            "data": data,
+            "summary": "\n".join(summary_lines),
+            "reminded_date": None,
+        }
+        auctions.append(auction_record)
+        records["_auctions"] = auctions
+        save_all(records)
+
+        send_message(chat_id, f"✅ مزایده ثبت شد!\n\n{auction_record['summary']}\n\n💡 یادآوری: ۲۴ ساعت قبل از تاریخ مزایده به شما اطلاع داده می‌شود.")
+
+    except Exception as e:
+        send_message(chat_id, f"خطا در پردازش فایل مزایده: {e}")
+
+def check_auction_reminders():
+    """یادآوری مزایده‌هایی که فردا سررسید هستند"""
+    data = load_all()
+    auctions = data.get("_auctions", [])
+    if not auctions:
+        return
+    today = datetime.utcnow().date()
+    changed = False
+    remaining = []
+
+    for a in auctions:
+        try:
+            due = datetime.fromisoformat(a["due_gregorian"]).date()
+        except ValueError:
+            # تلاش برای تبدیل
+            try:
+                due = datetime.strptime(a["due_gregorian"], "%Y-%m-%d").date()
+            except:
+                remaining.append(a)
+                continue
+
+        days_left = (due - today).days
+
+        if days_left < 0:
+            # سررسید گذشته، حذف می‌شود (یا می‌توانید نگه دارید)
+            changed = True
+            continue
+
+        if days_left == 1 and a.get("reminded_date") != str(today):
+            # ارسال یادآوری
+            text = f"⏰ **یادآوری مزایده**: فردا ({a['due_jalali']}) مزایده‌ای برای خودرو دارید.\n\n{a['summary']}\n\n⚠️ فراموش نکنید که مدارک و ودیعه را آماده کنید."
+            # اگر فایل مزایده داریم، آن را هم بفرستیم
+            if a.get("file_id"):
+                send_document(chat_id=a["chat_id"], filename="مزایده.pdf", content_str="")  # نمی‌توانیم فایل اصلی رو دوباره بفرستیم، کپشن رو می‌فرستیم
+                # برای ارسال فایل اصلی باید از send_document_bytes با file_bytes استفاده کنیم که نمی‌توانیم ذخیره کنیم
+                # در عوض کپشن یادآوری را می‌فرستیم
+            send_message(a["chat_id"], text)
+            a["reminded_date"] = str(today)
+            changed = True
+
+        remaining.append(a)
+
+    if changed:
+        data["_auctions"] = remaining
+        save_all(data)
+
+
+# ======================== ادامه هندلر اصلی ========================
 def handle_update(update):
     message = update.get("message")
     if not message:
@@ -579,13 +821,27 @@ def handle_update(update):
 
     media = message.get("video") or message.get("audio") or message.get("voice")
     doc = message.get("document")
-    if not media and doc:
+    
+    # اگر فایل سند ارسال شده (Word یا PDF) و کپشن دارد یا دستور /addauction دارد
+    if doc:
         mime = doc.get("mime_type") or ""
+        filename = doc.get("file_name") or ""
+        ext = os.path.splitext(filename)[1].lower()
+        caption = (message.get("caption") or "").strip()
+        
         if mime.startswith(("video/", "audio/")):
             media = doc
         elif mime.startswith("image/"):
-            handle_image_optimize(chat_id, doc["file_id"], (message.get("caption") or "").strip())
+            handle_image_optimize(chat_id, doc["file_id"], caption)
             return
+        elif ext in (".pdf", ".docx"):
+            # پردازش سند مزایده
+            handle_auction_document(chat_id, doc["file_id"], caption)
+            return
+        else:
+            send_message(chat_id, "این نوع فایل پشتیبانی نمی‌شود. لطفاً فایل PDF یا DOCX ارسال کنید.")
+            return
+
     if media:
         handle_media_message(chat_id, media)
         return
@@ -602,8 +858,7 @@ def handle_update(update):
         return
     user_text = message["text"].strip()
 
-    # تو گروه/کانال، فقط پیام‌های عادی رو تو یه بافر جمع می‌کنیم (بدون جواب دادن)،
-    # مگر این‌که دستور خاصی مثل /summarize باشه.
+    # تو گروه/کانال، فقط پیام‌های عادی رو تو یه بافر جمع می‌کنیم (بدون جواب دادن)
     if chat_type in ("group", "supergroup") and not user_text.startswith("/"):
         data = load_all()
         buffer = data.get("_group_buffer", {})
@@ -616,6 +871,47 @@ def handle_update(update):
         return
 
     # --- دستورات جدید و موجود ---
+
+    if user_text.startswith("/addauction"):
+        # این دستور می‌تواند بدون ارسال فایل، فقط کپشن باشد
+        # اما از آنجایی که فایل را در بالا پردازش کردیم، اینجا اگر کپشن دستی داریم،
+        # نیاز به فایل نداریم. ولی فرض می‌کنیم کاربر فایل را با کپشن فرستاده.
+        # اگر فایلی نرسیده، پیام خطا می‌دهیم.
+        parts = user_text.split(maxsplit=1)
+        if len(parts) > 1:
+            # دستی: تاریخ و توضیحات
+            send_message(chat_id, "لطفاً فایل PDF یا DOCX مزایده را ارسال کنید (می‌توانید کپشن هم داشته باشید).")
+            return
+        else:
+            send_message(chat_id, "فرمت درست:\n/addauction و سپس فایل PDF/DOCX را ارسال کنید.")
+        return
+
+    if user_text == "/auctions":
+        data = load_all()
+        my_auctions = [a for a in data.get("_auctions", []) if a["chat_id"] == chat_id]
+        if not my_auctions:
+            send_message(chat_id, "هیچ مزایده‌ای ثبت نشده است.")
+            return
+        lines = [f"#{a['id']} — {a['due_jalali']} — {a['data'].get('نوع وسیله نقلیه', 'نامشخص')} — {a['data'].get('مدل وسیله نقلیه', 'نامشخص')}" for a in my_auctions]
+        send_message(chat_id, "📋 **لیست مزایده‌های شما:**\n" + "\n".join(lines))
+        return
+
+    if user_text.startswith("/removeauction "):
+        auction_id = user_text[len("/removeauction "):].strip()
+        data = load_all()
+        auctions = [a for a in data.get("_auctions", []) if a["id"] != auction_id]
+        data["_auctions"] = auctions
+        save_all(data)
+        send_message(chat_id, f"مزایده با شناسه {auction_id} حذف شد (اگر وجود داشت).")
+        return
+
+    if user_text.startswith("/trend"):
+        query = user_text[len("/trend"):].strip()
+        if not query:
+            send_message(chat_id, "لطفاً موضوع مورد نظر را وارد کنید. مثال: /trend هوش مصنوعی")
+            return
+        handle_trend(chat_id, query)
+        return
 
     if user_text.startswith("/translation"):
         parts = user_text.split()
@@ -751,6 +1047,10 @@ def handle_update(update):
             "/skill list - لیست اسکیل‌های ساخته‌شده\n"
             "/skill delete name - حذف یه اسکیل\n"
             "/translation [colloquial|formal|sorani|all] - انتخاب حالت ترجمه ویدیو/صدا\n"
+            "/trend موضوع - جستجوی اخبار و ترندهای ۳۰ روز اخیر و خلاصه‌سازی هوشمند\n"
+            "/addauction - ارسال فایل PDF یا DOCX مزایده (به صورت فایل یا کپشن)\n"
+            "/auctions - لیست مزایده‌های ثبت‌شده\n"
+            "/removeauction id - حذف یه مزایده\n"
             "/help - همین راهنما\n\n"
             "📹 یه ویدیو، صدا، یا ویس (حداکثر ~۱۹ مگابایت) بفرست تا زبانش تشخیص داده بشه "
             "و متن اصلی + ترجمه‌ش رو به‌صورت srt/vtt/sbv/txt برات بفرستم.\n\n"
@@ -1331,15 +1631,25 @@ def main():
     start_time = time.time()
     offset = None
     last_reminder_check = 0
+    last_auction_reminder_check = 0
     print("بات روشن شد...")
 
     while time.time() - start_time < MAX_RUNTIME_SECONDS:
+        # چک‌های مالی
         if time.time() - last_reminder_check > 3600:
             try:
                 check_reminders()
             except Exception as e:
                 print(f"خطا در چک یادآوری چک‌ها: {e}")
             last_reminder_check = time.time()
+
+        # چک مزایده‌ها (هر ۶ ساعت یکبار)
+        if time.time() - last_auction_reminder_check > 21600:
+            try:
+                check_auction_reminders()
+            except Exception as e:
+                print(f"خطا در چک یادآوری مزایده‌ها: {e}")
+            last_auction_reminder_check = time.time()
 
         params = {"timeout": POLL_TIMEOUT}
         if offset:
