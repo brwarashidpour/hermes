@@ -18,9 +18,10 @@ import jdatetime
 import io
 import asyncio
 import edge_tts
-import feedparser  # برای خواندن RSS خبری
-import fitz  # PyMuPDF برای PDF
-import docx  # python-docx برای Word
+import feedparser
+import fitz  # PyMuPDF
+import docx
+import pytesseract  # برای OCR تصاویر
 from datetime import datetime, timedelta
 from PIL import Image
 from bs4 import BeautifulSoup
@@ -615,46 +616,48 @@ def handle_trend(chat_id, query):
         send_message(chat_id, f"خطا در جستجوی اخبار: {e}")
 
 
-# ======================== Skill: پردازش اسناد مزایده (Word & PDF) ========================
+# ======================== Skill: پردازش اسناد مزایده (Word, PDF, Image) ========================
 def extract_text_from_doc(file_bytes, filename):
-    """متن فایل PDF یا DOCX را استخراج می‌کند."""
+    """متن فایل PDF، DOCX، یا تصویر را استخراج می‌کند."""
     ext = os.path.splitext(filename)[1].lower()
     text = ""
     if ext == ".pdf":
-        # استخراج با PyMuPDF
         with fitz.open(stream=file_bytes, filetype="pdf") as doc:
             for page in doc:
                 text += page.get_text()
     elif ext == ".docx":
-        # استخراج با python-docx
         doc = docx.Document(io.BytesIO(file_bytes))
         text = "\n".join([para.text for para in doc.paragraphs])
+    elif ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
+        # OCR تصویر با حفظ کامل متن
+        img = Image.open(io.BytesIO(file_bytes))
+        # استفاده از زبان‌های فارسی و انگلیسی برای دقت بالا
+        text = pytesseract.image_to_string(img, lang="fas+eng")
     else:
-        raise ValueError("فرمت فایل پشتیبانی نمی‌شود (فقط PDF و DOCX)")
+        raise ValueError("فرمت فایل پشتیبانی نمی‌شود (فقط PDF، DOCX و تصاویر)")
     return normalize_text(text)
 
 def parse_auction_text(text):
     """با استفاده از AI، اطلاعات کلیدی مزایده را استخراج می‌کند."""
     prompt = (
         "متن زیر سند مزایده یک خودرو است. لطفاً اطلاعات زیر را با دقت استخراج کن و به صورت JSON برگردان:\n"
-        "1. تاریخ مزایده (به صورت میلادی یا شمسی - هر کدام موجود است)\n"
-        "2. نوع وسیله نقلیه (مثلاً سواری، وانت، کامیون)\n"
-        "3. مدل وسیله نقلیه (سال و برند)\n"
-        "4. مبلغ ودیعه (به ریال یا تومان)\n"
-        "5. شماره شاسی (VIN)\n"
-        "6. شماره پلاک (اگر موجود است)\n"
-        "7. مبلغ پایه قیمت (قیمت شروع)\n"
-        "8. وضعیت خودرو (مثلاً سالم، تصادفی، نو، کارکرده)\n"
-        "9. محل تحویل خودرو\n"
-        "10. شرایط و ضوابط مهم (مثلاً، نیاز به وکالت، هزینه انتقال، و غیره)\n\n"
+        "1. تاریخ مزایده (تاریخ برگزاری)\n"
+        "2. تاریخ مهلت دریافت اسناد (آخرین مهلت برای خرید/دریافت اسناد یا ارائه پیشنهاد)\n"
+        "3. نوع وسیله نقلیه (مثلاً سواری، وانت، کامیون)\n"
+        "4. مدل وسیله نقلیه (سال و برند)\n"
+        "5. مبلغ ودیعه (به ریال یا تومان)\n"
+        "6. شماره شاسی (VIN)\n"
+        "7. شماره پلاک (اگر موجود است)\n"
+        "8. مبلغ پایه قیمت (قیمت شروع)\n"
+        "9. وضعیت خودرو (مثلاً سالم، تصادفی، نو، کارکرده)\n"
+        "10. محل تحویل خودرو\n"
+        "11. شرایط و ضوابط مهم\n\n"
         f"متن سند:\n{text[:8000]}\n\n"
         "فقط JSON خروجی بده، بدون توضیح اضافه. اگر فیلدی پیدا نشد، مقدار null بگذار."
     )
     try:
         reply, _, _ = get_ai_response([{"role": "user", "content": prompt}], max_tokens=1500)
-        # تلاش برای استخراج JSON از پاسخ
         import json
-        # پیدا کردن اولین { و آخرین }
         start = reply.find('{')
         end = reply.rfind('}') + 1
         if start != -1 and end > start:
@@ -688,15 +691,14 @@ def handle_auction_document(chat_id, file_id, caption):
             send_message(chat_id, "نتونستم اطلاعات مزایده رو به درستی استخراج کنم. لطفاً فایل رو بررسی کن یا با کپشن دستی بفرست.")
             return
 
-        # پیدا کردن تاریخ مزایده (تلاش برای تشخیص)
+        # پیدا کردن تاریخ مزایده
         auction_date_str = data.get("تاریخ مزایده") or data.get("date") or data.get("auction_date")
         if not auction_date_str:
             send_message(chat_id, "تاریخ مزایده در فایل پیدا نشد. لطفاً تاریخ رو به صورت دستی تو کپشن بنویسید (مثلاً 1405-06-01).")
             return
 
-        # تبدیل تاریخ به میلادی و شمسی
+        # تبدیل تاریخ
         try:
-            # تلاش برای تشخیص فرمت تاریخ (شمسی یا میلادی)
             if re.match(r'\d{4}-\d{2}-\d{2}', auction_date_str):
                 year, month, day = map(int, auction_date_str.split('-'))
                 if year > 1400:  # شمسی
@@ -707,12 +709,11 @@ def handle_auction_document(chat_id, file_id, caption):
                     jd = jdatetime.date.fromgregorian(date=due_gregorian)
                     due_jalali = f"{jd.year}-{jd.month:02d}-{jd.day:02d}"
             else:
-                # ساده: فرض می‌کنیم شمسی است و با جداکننده / یا .
                 auction_date_str = re.sub(r'[\./]', '-', auction_date_str)
                 parts = list(map(int, re.findall(r'\d+', auction_date_str)))
                 if len(parts) >= 3:
                     year, month, day = parts[0], parts[1], parts[2]
-                    if year < 100:  # دو رقمی
+                    if year < 100:
                         year += 1400
                     due_jalali = f"{year}-{month:02d}-{day:02d}"
                     due_gregorian = jdatetime.date(year, month, day).togregorian()
@@ -722,15 +723,49 @@ def handle_auction_document(chat_id, file_id, caption):
             send_message(chat_id, f"خطا در خواندن تاریخ: {e}. لطفاً تاریخ رو به صورت شمسی (سال-ماه-روز) توی کپشن بنویسید.")
             return
 
-        # ذخیره در حافظه
-        records = load_all()
-        auctions = records.get("_auctions", [])
-        new_id = str(max([int(a["id"]) for a in auctions], default=0) + 1)
+        # پیدا کردن مهلت دریافت اسناد
+        doc_deadline_str = data.get("تاریخ مهلت دریافت اسناد") or data.get("date_receipt")
+        if doc_deadline_str:
+            try:
+                # تبدیل مثل تاریخ مزایده
+                if re.match(r'\d{4}-\d{2}-\d{2}', doc_deadline_str):
+                    year, month, day = map(int, doc_deadline_str.split('-'))
+                    if year > 1400:
+                        doc_deadline_jalali = f"{year}-{month:02d}-{day:02d}"
+                        doc_deadline_gregorian = jdatetime.date(year, month, day).togregorian()
+                    else:
+                        doc_deadline_gregorian = datetime(year, month, day).date()
+                        jd = jdatetime.date.fromgregorian(date=doc_deadline_gregorian)
+                        doc_deadline_jalali = f"{jd.year}-{jd.month:02d}-{jd.day:02d}"
+                else:
+                    doc_deadline_str = re.sub(r'[\./]', '-', doc_deadline_str)
+                    parts = list(map(int, re.findall(r'\d+', doc_deadline_str)))
+                    if len(parts) >= 3:
+                        year, month, day = parts[0], parts[1], parts[2]
+                        if year < 100:
+                            year += 1400
+                        doc_deadline_jalali = f"{year}-{month:02d}-{day:02d}"
+                        doc_deadline_gregorian = jdatetime.date(year, month, day).togregorian()
+                    else:
+                        doc_deadline_gregorian = due_gregorian - timedelta(days=3)
+                        jd = jdatetime.date.fromgregorian(date=doc_deadline_gregorian)
+                        doc_deadline_jalali = f"{jd.year}-{jd.month:02d}-{jd.day:02d}"
+            except:
+                # اگر شکست خورد، ۳ روز قبل از مزایده
+                doc_deadline_gregorian = due_gregorian - timedelta(days=3)
+                jd = jdatetime.date.fromgregorian(date=doc_deadline_gregorian)
+                doc_deadline_jalali = f"{jd.year}-{jd.month:02d}-{jd.day:02d}"
+        else:
+            # اگر مهلت دریافت اسناد پیدا نشد، ۳ روز قبل از مزایده
+            doc_deadline_gregorian = due_gregorian - timedelta(days=3)
+            jd = jdatetime.date.fromgregorian(date=doc_deadline_gregorian)
+            doc_deadline_jalali = f"{jd.year}-{jd.month:02d}-{jd.day:02d}"
 
         # خلاصه اطلاعات برای نمایش
         summary_lines = [
             f"🆔 شناسه: {new_id}",
             f"📅 تاریخ مزایده: {due_jalali}",
+            f"📅 مهلت دریافت اسناد: {doc_deadline_jalali}",
             f"🚗 نوع خودرو: {data.get('نوع وسیله نقلیه', 'نامشخص')}",
             f"🏷️ مدل: {data.get('مدل وسیله نقلیه', 'نامشخص')}",
             f"💰 ودیعه: {data.get('مبلغ ودیعه', 'نامشخص')}",
@@ -745,12 +780,19 @@ def handle_auction_document(chat_id, file_id, caption):
         if data.get("شرایط و ضوابط مهم"):
             summary_lines.append(f"📜 شرایط: {data['شرایط و ضوابط مهم']}")
 
+        # ذخیره در حافظه
+        records = load_all()
+        auctions = records.get("_auctions", [])
+        new_id = str(max([int(a["id"]) for a in auctions], default=0) + 1)
+
         auction_record = {
             "id": new_id,
             "chat_id": chat_id,
             "file_id": file_id,
             "due_jalali": due_jalali,
             "due_gregorian": due_gregorian.isoformat(),
+            "doc_deadline_jalali": doc_deadline_jalali,
+            "doc_deadline_gregorian": doc_deadline_gregorian.isoformat(),
             "data": data,
             "summary": "\n".join(summary_lines),
             "reminded_date": None,
@@ -759,47 +801,38 @@ def handle_auction_document(chat_id, file_id, caption):
         records["_auctions"] = auctions
         save_all(records)
 
-        send_message(chat_id, f"✅ مزایده ثبت شد!\n\n{auction_record['summary']}\n\n💡 یادآوری: ۲۴ ساعت قبل از تاریخ مزایده به شما اطلاع داده می‌شود.")
+        send_message(chat_id, f"✅ مزایده ثبت شد!\n\n{auction_record['summary']}\n\n💡 یادآوری: بر اساس تنظیمات شما، قبل از پایان مهلت دریافت اسناد به شما اطلاع داده می‌شود.")
 
     except Exception as e:
         send_message(chat_id, f"خطا در پردازش فایل مزایده: {e}")
 
 def check_auction_reminders():
-    """یادآوری مزایده‌هایی که فردا سررسید هستند"""
+    """یادآوری مزایده‌ها بر اساس مهلت دریافت اسناد و تنظیمات کاربر"""
     data = load_all()
     auctions = data.get("_auctions", [])
     if not auctions:
         return
     today = datetime.utcnow().date()
+    settings = data.get("_auction_remind_settings", {})
     changed = False
     remaining = []
 
     for a in auctions:
-        try:
-            due = datetime.fromisoformat(a["due_gregorian"]).date()
-        except ValueError:
-            # تلاش برای تبدیل
-            try:
-                due = datetime.strptime(a["due_gregorian"], "%Y-%m-%d").date()
-            except:
-                remaining.append(a)
-                continue
+        # از مهلت دریافت اسناد استفاده کن، اگر نبود از تاریخ مزایده منهای ۳ روز
+        if a.get("doc_deadline_gregorian"):
+            due = datetime.fromisoformat(a["doc_deadline_gregorian"]).date()
+        else:
+            due = datetime.fromisoformat(a["due_gregorian"]).date() - timedelta(days=3)
 
         days_left = (due - today).days
+        remind_days = settings.get(a["chat_id"], 3)  # پیش‌فرض ۳ روز
 
         if days_left < 0:
-            # سررسید گذشته، حذف می‌شود (یا می‌توانید نگه دارید)
             changed = True
-            continue
+            continue  # گذشته، حذف کن
 
-        if days_left == 1 and a.get("reminded_date") != str(today):
-            # ارسال یادآوری
-            text = f"⏰ **یادآوری مزایده**: فردا ({a['due_jalali']}) مزایده‌ای برای خودرو دارید.\n\n{a['summary']}\n\n⚠️ فراموش نکنید که مدارک و ودیعه را آماده کنید."
-            # اگر فایل مزایده داریم، آن را هم بفرستیم
-            if a.get("file_id"):
-                send_document(chat_id=a["chat_id"], filename="مزایده.pdf", content_str="")  # نمی‌توانیم فایل اصلی رو دوباره بفرستیم، کپشن رو می‌فرستیم
-                # برای ارسال فایل اصلی باید از send_document_bytes با file_bytes استفاده کنیم که نمی‌توانیم ذخیره کنیم
-                # در عوض کپشن یادآوری را می‌فرستیم
+        if days_left == remind_days and a.get("reminded_date") != str(today):
+            text = f"⏰ **یادآوری مهلت دریافت اسناد**: {a['doc_deadline_jalali']} مهلت دریافت اسناد این مزایده تمام می‌شود!\n\n{a['summary']}\n\n⚠️ فوراً اقدام کنید!"
             send_message(a["chat_id"], text)
             a["reminded_date"] = str(today)
             changed = True
@@ -821,8 +854,9 @@ def handle_update(update):
 
     media = message.get("video") or message.get("audio") or message.get("voice")
     doc = message.get("document")
+    photo = message.get("photo")
     
-    # اگر فایل سند ارسال شده (Word یا PDF) و کپشن دارد یا دستور /addauction دارد
+    # اگر فایل سند ارسال شده (Word، PDF، یا عکس) و کپشن دارد یا دستور /addauction دارد
     if doc:
         mime = doc.get("mime_type") or ""
         filename = doc.get("file_name") or ""
@@ -834,31 +868,35 @@ def handle_update(update):
         elif mime.startswith("image/"):
             handle_image_optimize(chat_id, doc["file_id"], caption)
             return
-        elif ext in (".pdf", ".docx"):
-            # پردازش سند مزایده
+        elif ext in (".pdf", ".docx") or ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"):
             handle_auction_document(chat_id, doc["file_id"], caption)
             return
         else:
-            send_message(chat_id, "این نوع فایل پشتیبانی نمی‌شود. لطفاً فایل PDF یا DOCX ارسال کنید.")
+            send_message(chat_id, "این نوع فایل پشتیبانی نمی‌شود. لطفاً فایل PDF، DOCX یا تصویر ارسال کنید.")
+            return
+
+    if photo:
+        # اگر عکسی به عنوان سند مزایده ارسال شده (با کپشن یا بدون)
+        caption = (message.get("caption") or "").strip()
+        if caption.startswith("/addauction"):
+            # اگر کاربر /addauction نوشته و عکس فرستاده
+            # ارسال عکس به عنوان سند مزایده
+            file_id = photo[-1]["file_id"]
+            handle_auction_document(chat_id, file_id, caption)
+            return
+        else:
+            handle_image_optimize(chat_id, photo[-1]["file_id"], caption)
             return
 
     if media:
         handle_media_message(chat_id, media)
         return
 
-    if message.get("photo"):
-        caption = (message.get("caption") or "").strip()
-        if caption.startswith("/addcheck"):
-            handle_addcheck(chat_id, caption, photo_file_id=message["photo"][-1]["file_id"])
-        else:
-            handle_image_optimize(chat_id, message["photo"][-1]["file_id"], caption)
-        return
-
     if "text" not in message:
         return
     user_text = message["text"].strip()
 
-    # تو گروه/کانال، فقط پیام‌های عادی رو تو یه بافر جمع می‌کنیم (بدون جواب دادن)
+    # تو گروه/کانال، فقط پیام‌های عادی رو تو یه بافر جمع می‌کنیم
     if chat_type in ("group", "supergroup") and not user_text.startswith("/"):
         data = load_all()
         buffer = data.get("_group_buffer", {})
@@ -880,10 +918,10 @@ def handle_update(update):
         parts = user_text.split(maxsplit=1)
         if len(parts) > 1:
             # دستی: تاریخ و توضیحات
-            send_message(chat_id, "لطفاً فایل PDF یا DOCX مزایده را ارسال کنید (می‌توانید کپشن هم داشته باشید).")
+            send_message(chat_id, "لطفاً فایل PDF، DOCX یا تصویر مزایده را ارسال کنید (می‌توانید کپشن هم داشته باشید).")
             return
         else:
-            send_message(chat_id, "فرمت درست:\n/addauction و سپس فایل PDF/DOCX را ارسال کنید.")
+            send_message(chat_id, "فرمت درست:\n/addauction و سپس فایل PDF/DOCX/تصویر را ارسال کنید.")
         return
 
     if user_text == "/auctions":
@@ -903,6 +941,26 @@ def handle_update(update):
         data["_auctions"] = auctions
         save_all(data)
         send_message(chat_id, f"مزایده با شناسه {auction_id} حذف شد (اگر وجود داشت).")
+        return
+
+    if user_text.startswith("/auction_remind"):
+        parts = user_text.split()
+        if len(parts) != 2:
+            send_message(chat_id, "فرمت: /auction_remind [تعداد روز] (مثلاً 3)")
+            return
+        try:
+            days = int(parts[1])
+            if days < 1 or days > 7:
+                send_message(chat_id, "تعداد روز باید بین ۱ تا ۷ باشد.")
+                return
+            data = load_all()
+            settings = data.get("_auction_remind_settings", {})
+            settings[chat_id] = days
+            data["_auction_remind_settings"] = settings
+            save_all(data)
+            send_message(chat_id, f"✅ تنظیم شد: {days} روز قبل از مهلت دریافت اسناد به شما یادآوری می‌شود.")
+        except ValueError:
+            send_message(chat_id, "لطفاً یک عدد وارد کنید. مثال: /auction_remind 3")
         return
 
     if user_text.startswith("/trend"):
@@ -1048,9 +1106,10 @@ def handle_update(update):
             "/skill delete name - حذف یه اسکیل\n"
             "/translation [colloquial|formal|sorani|all] - انتخاب حالت ترجمه ویدیو/صدا\n"
             "/trend موضوع - جستجوی اخبار و ترندهای ۳۰ روز اخیر و خلاصه‌سازی هوشمند\n"
-            "/addauction - ارسال فایل PDF یا DOCX مزایده (به صورت فایل یا کپشن)\n"
+            "/addauction - ارسال فایل PDF، DOCX یا تصویر مزایده (به صورت فایل یا کپشن)\n"
             "/auctions - لیست مزایده‌های ثبت‌شده\n"
             "/removeauction id - حذف یه مزایده\n"
+            "/auction_remind [روز] - تنظیم تعداد روز قبل از پایان مهلت برای یادآوری (۱ تا ۷)\n"
             "/help - همین راهنما\n\n"
             "📹 یه ویدیو، صدا، یا ویس (حداکثر ~۱۹ مگابایت) بفرست تا زبانش تشخیص داده بشه "
             "و متن اصلی + ترجمه‌ش رو به‌صورت srt/vtt/sbv/txt برات بفرستم.\n\n"
