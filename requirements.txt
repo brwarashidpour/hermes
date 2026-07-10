@@ -1,6 +1,7 @@
 feedparser
 PyMuPDF
 python-docx
+pytesseract
 edge-tts
 requests
 jdatetime
