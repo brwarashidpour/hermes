@@ -19,10 +19,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Install grok-build
-        run: |
-          curl -fsSL https://x.ai/cli/install.sh | bash
-          echo "$HOME/.xai/bin" >> $GITHUB_PATH
       - run: pip install -r requirements.txt
       - run: python bot.py
         env:
@@ -31,4 +27,3 @@ jobs:
           GIST_ID: ${{ secrets.GIST_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
