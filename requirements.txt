@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+jdatetime
+edge-tts
+fpdf2
+arabic-reshaper
+python-bidi
